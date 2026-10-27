@@ -1,0 +1,9 @@
+Nombre legal de la LLC: [COMPLETAR]
+Estado de constitución (p. ej. Wyoming, Delaware, Florida): [COMPLETAR]
+EIN (opcional): [COMPLETAR]
+Dirección registrada: [COMPLETAR]
+Representante que firma (nombre y cargo, p. ej. Managing Member): [COMPLETAR]
+Email de contacto: [COMPLETAR]
+Moneda habitual (USD, EUR…): [COMPLETAR]
+Ley aplicable y jurisdicción preferidas (si no lo sabes, déjalo así y Jarvis te preguntará): [COMPLETAR]
+Idioma de los contratos: español

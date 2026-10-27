@@ -45,9 +45,26 @@ const APPROVAL = /^(s[ií]|no)\s+(\d+)$/i;
 const WHISPER_URL = env.WHISPER_URL || 'http://127.0.0.1:9000';
 const WHISPER_LANGUAGE = env.WHISPER_LANGUAGE || 'es';
 const MCP_NONE = path.join(ROOT, 'bridge', 'mcp-none.json');
-const SYSTEM_PROMPT = fs.readFileSync(path.join(ROOT, 'bridge', 'system-prompt.txt'), 'utf8')
-  .replaceAll('{{OWNER_NAME}}', env.OWNER_NAME)
-  .replaceAll('{{OWNER_ABOUT}}', env.OWNER_ABOUT);
+const PROMPT_FILE = path.join(ROOT, 'bridge', 'system-prompt.txt');
+const EMISOR_FILE = path.join(ROOT, 'perfil', 'emisor.txt');
+const DOC_BLOCK = /\[\[DOCUMENTO\|([^\]\n]{1,80})\]\]\s*([\s\S]*?)\s*\[\[\/DOCUMENTO\]\]/g;
+const DOC_SEND_BLOCK = /\[\[ENVIAR_DOC\|\+?([\d\s]{8,20})\|([^\]\n]{1,60})\]\]\s*([\s\S]*?)\s*\[\[\/ENVIAR_DOC\]\]/g;
+const DOCS_DIR = path.join(WORKSPACE, 'docs');
+const LAST_DOC_FILE = path.join(WORKSPACE, 'last-doc.json');
+const PANDOC_IMAGE = 'pandoc/core:3.11.0';
+const PANDOC_TIMEOUT_MS = 60_000;
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+// Se lee en cada mensaje: los cambios en el prompt o en perfil/emisor.txt se aplican sin reiniciar.
+function systemPrompt() {
+  const emisor = fs.existsSync(EMISOR_FILE)
+    ? fs.readFileSync(EMISOR_FILE, 'utf8').trim()
+    : '(sin datos: pídeselos a {{OWNER_NAME}} antes de redactar un contrato)';
+  return fs.readFileSync(PROMPT_FILE, 'utf8')
+    .replaceAll('{{EMISOR}}', emisor)
+    .replaceAll('{{OWNER_NAME}}', env.OWNER_NAME)
+    .replaceAll('{{OWNER_ABOUT}}', env.OWNER_ABOUT);
+}
 const LOG_FILE = path.join(ROOT, 'logs', 'bridge.log');
 fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
 fs.mkdirSync(WORKSPACE, { recursive: true });
@@ -66,6 +83,70 @@ async function sendText(chatId, text) {
     body: JSON.stringify({ session: env.WAHA_SESSION, chatId, text }),
   });
   if (!res.ok) throw new Error(`WAHA sendText HTTP ${res.status}`);
+}
+
+async function sendFile(chatId, filePath, filename, caption) {
+  const res = await fetch(`${env.WAHA_URL}/api/sendFile`, {
+    method: 'POST',
+    headers: { 'X-Api-Key': env.WAHA_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session: env.WAHA_SESSION,
+      chatId,
+      caption,
+      file: { mimetype: DOCX_MIME, filename, data: fs.readFileSync(filePath).toString('base64') },
+    }),
+  });
+  if (!res.ok) throw new Error(`WAHA sendFile HTTP ${res.status}`);
+}
+
+function slugify(text) {
+  return text.normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'documento';
+}
+
+// Convierte el Markdown de Claude en un .docx con Pandoc (contenedor de un solo uso).
+function makeDocx(title, markdown) {
+  fs.mkdirSync(DOCS_DIR, { recursive: true });
+  const base = `${new Date().toISOString().slice(0, 10)}-${slugify(title)}`;
+  fs.writeFileSync(path.join(DOCS_DIR, `${base}.md`), markdown);
+  const args = ['run', '--rm', '-v', `${DOCS_DIR}:/data`, PANDOC_IMAGE, `/data/${base}.md`, '-o', `/data/${base}.docx`];
+
+  return new Promise((resolve, reject) => {
+    const child = spawn('docker', args, { windowsHide: true });
+    let err = '';
+    const timer = setTimeout(() => { child.kill(); reject(new Error('Pandoc tardó más de 1 minuto')); }, PANDOC_TIMEOUT_MS);
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', (e) => { clearTimeout(timer); reject(e); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve({ filePath: path.join(DOCS_DIR, `${base}.docx`), filename: `${base}.docx` });
+      else reject(new Error(`Pandoc salió con código ${code}: ${err.slice(0, 200)}`));
+    });
+  });
+}
+
+// Pedidos de enviar a alguien el último documento creado: [[ENVIAR_DOC|número|nombre]] mensaje [[/ENVIAR_DOC]]
+function extractDocSends(reply) {
+  const sends = [];
+  const visible = reply.replace(DOC_SEND_BLOCK, (_, phone, name, caption) => {
+    sends.push({ phone: phone.replace(/\s/g, ''), name: name.trim(), text: caption.trim() });
+    return '';
+  }).trim();
+  return { visible, sends };
+}
+
+function readLastDoc() {
+  if (!fs.existsSync(LAST_DOC_FILE)) return null;
+  return JSON.parse(fs.readFileSync(LAST_DOC_FILE, 'utf8'));
+}
+
+function extractDocs(reply) {
+  const docs = [];
+  const visible = reply.replace(DOC_BLOCK, (_, title, markdown) => {
+    docs.push({ title: title.trim(), markdown: markdown.trim() });
+    return '';
+  }).trim();
+  return { visible, docs };
 }
 
 function isAudio(p) {
@@ -145,7 +226,7 @@ function runClaude(prompt, sessionId) {
     '--tools', '',
     '--setting-sources', 'project',
     '--strict-mcp-config', '--mcp-config', MCP_NONE,
-    '--system-prompt', SYSTEM_PROMPT,
+    '--system-prompt', systemPrompt(),
     '--system-prompt-snapshot', 'off', // si no, al reanudar reutiliza el prompt grabado y ignora cambios
   ];
   if (sessionId) args.push('--resume', sessionId);
@@ -247,14 +328,48 @@ async function converse(ownerChat, text) {
     log(`ERROR Claude: ${e.message}`);
     reply = `No pude responderte: ${e.message}`;
   }
-  const { visible, drafts } = extractDrafts(reply);
+  const withoutDocs = extractDocs(reply);
+  const withoutDocSends = extractDocSends(withoutDocs.visible);
+  const { visible, drafts } = extractDrafts(withoutDocSends.visible);
   if (visible) await sendText(ownerChat, visible);
+  for (const doc of withoutDocs.docs) {
+    await deliverDoc(ownerChat, doc);
+  }
+  for (const s of withoutDocSends.sends) {
+    await proposeDocSend(ownerChat, s);
+  }
   for (const d of drafts) {
     const n = addPending(d);
     log(`borrador ${n} creado para ${d.phone}`);
     await sendText(ownerChat, `📤 *Borrador ${n}* para *${d.name}* (+${d.phone}):\n\n${d.text}\n\nResponde *sí ${n}* para enviarlo o *no ${n}* para descartarlo.`);
   }
-  log(`Claude → dueño (${visible.length} car., ${drafts.length} borradores)`);
+  const counts = `${withoutDocs.docs.length} documentos, ${withoutDocSends.sends.length} envíos de documento, ${drafts.length} borradores`;
+  log(`Claude → dueño (${visible.length} car., ${counts})`);
+}
+
+// Envío de un documento a un tercero: queda pendiente hasta el "sí N" del dueño.
+async function proposeDocSend(ownerChat, s) {
+  const doc = readLastDoc();
+  if (!doc || !fs.existsSync(doc.filePath)) {
+    await sendText(ownerChat, 'No tengo ningún documento reciente para enviar. Pídeme primero que lo cree.');
+    return;
+  }
+  const n = addPending({ ...s, kind: 'doc', filePath: doc.filePath, filename: doc.filename, title: doc.title });
+  log(`borrador ${n} (documento ${doc.filename}) creado para ${s.phone}`);
+  await sendText(ownerChat, `📤 *Borrador ${n}* para *${s.name}* (+${s.phone}):\n📎 ${doc.filename}\n\n${s.text}\n\nResponde *sí ${n}* para enviarlo o *no ${n}* para descartarlo.`);
+}
+
+// Los documentos solo van al dueño: él los revisa y los reenvía si quiere.
+async function deliverDoc(ownerChat, doc) {
+  try {
+    const { filePath, filename } = await makeDocx(doc.title, doc.markdown);
+    await sendFile(ownerChat, filePath, filename, `📄 *${doc.title}* (borrador: revísalo antes de enviarlo)`);
+    fs.writeFileSync(LAST_DOC_FILE, JSON.stringify({ filePath, filename, title: doc.title }));
+    log(`documento enviado al dueño: ${filename}`);
+  } catch (e) {
+    log(`ERROR documento: ${e.message}`);
+    await sendText(ownerChat, `No pude crear el Word de «${doc.title}»: ${e.message}`);
+  }
 }
 
 // Las aprobaciones las resuelve el puente, nunca Claude.
@@ -275,7 +390,15 @@ async function handleApproval(ownerChat, verb, n) {
     await sendText(ownerChat, `El número +${item.phone} no tiene WhatsApp; no envié el borrador ${n}.`);
     return;
   }
-  await sendText(chatId, item.text);
+  if (item.kind === 'doc') {
+    if (!fs.existsSync(item.filePath)) {
+      await sendText(ownerChat, `Ya no encuentro el archivo ${item.filename}; no envié el borrador ${n}.`);
+      return;
+    }
+    await sendFile(chatId, item.filePath, item.filename, item.text);
+  } else {
+    await sendText(chatId, item.text);
+  }
   removePending(n);
   log(`borrador ${n} enviado a ${item.phone} tras aprobación`);
   notesForClaude.push(`Se envió el borrador ${n} a ${item.name} (+${item.phone}).`);

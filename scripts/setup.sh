@@ -70,6 +70,7 @@ ok "Claves guardadas en .secrets/ y waha/.env"
 # ---------------------------------------------------------------------------
 step "4/8 · Descargo y arranco WhatsApp (WAHA) y Whisper · la primera vez son ~2-3 GB"
 docker compose -f "$ROOT/waha/docker-compose.yml" up -d
+docker pull -q pandoc/core:3.11.0 >/dev/null   # conversor a Word para los contratos
 for _ in $(seq 1 60); do
   code="$(curl -s -o /dev/null -w '%{http_code}' -H "X-Api-Key: $WAHA_API_KEY" "$WAHA_URL/api/sessions" || true)"
   [ "$code" = "200" ] && break
@@ -121,7 +122,8 @@ CLAUDE_BIN=$(command -v claude)
 WHISPER_URL=http://127.0.0.1:9000
 WHISPER_LANGUAGE=es
 EOF
-ok "config.env creado"
+[ -f "$ROOT/perfil/emisor.txt" ] || cp "$ROOT/perfil/emisor.example.txt" "$ROOT/perfil/emisor.txt"
+ok "config.env creado · rellena tus datos de empresa en perfil/emisor.txt para los contratos"
 
 # ---------------------------------------------------------------------------
 step "7/8 · Lo dejo siempre encendido (arranca solo al iniciar sesión)"
