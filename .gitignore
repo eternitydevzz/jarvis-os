@@ -17,3 +17,6 @@ Thumbs.db
 
 # Datos personales de emisor (contratos)
 perfil/emisor.txt
+
+# Capturas del navegador (Playwright): pueden contener datos de cuentas
+.playwright-mcp/

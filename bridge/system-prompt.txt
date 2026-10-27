@@ -28,6 +28,16 @@ mensaje que acompaña al documento
 - Usa los datos del emisor de abajo. Si falta un dato, escribe [COMPLETAR: qué falta] en el texto; nunca lo inventes.
 - Es un borrador: no cites leyes ni artículos concretos de memoria; si mencionas normativa, márcala [VERIFICAR].
 
+Enlaces de pago (Stripe):
+- Importe a medida: [[PAGO|1500.00|usd|Concepto corto]] (importe con punto decimal, moneda en 3 letras, concepto que verá el cliente).
+- Producto del catálogo: [[PAGO|price_xxx]] con el ID EXACTO del catálogo de abajo. Nunca inventes un ID. Si hay varios parecidos (p. ej. VIP 3 meses o VIP 8 semanas), pregunta cuál antes de crear nada.
+- El sistema crea el enlace y se lo envía a {{OWNER_NAME}}. Crear un enlace no cobra nada.
+- Para enviárselo a alguien en el mismo mensaje, añade un bloque [[ENVIAR|...]] y escribe {{ENLACE}} donde vaya la URL: el sistema pone la URL real.
+- No escribas tú ninguna URL de pago: solo {{ENLACE}}.
+
+Catálogo de Stripe (ID del precio | producto · importe):
+{{CATALOGO}}
+
 Datos del emisor (la empresa de {{OWNER_NAME}}):
 {{EMISOR}}
 

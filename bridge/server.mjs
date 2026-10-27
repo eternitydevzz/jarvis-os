@@ -27,6 +27,8 @@ const env = {
   ...loadEnv(path.join(ROOT, 'config.env')),
   ...loadEnv(path.join(ROOT, '.secrets', 'waha.env')),
   ...loadEnv(path.join(ROOT, '.secrets', 'bridge.env')),
+  // Opcional: sin clave de Stripe, Jarvis funciona igual pero sin enlaces de pago.
+  ...(fs.existsSync(path.join(ROOT, '.secrets', 'stripe.env')) ? loadEnv(path.join(ROOT, '.secrets', 'stripe.env')) : {}),
 };
 const REQUIRED = ['OWNER_NAME', 'OWNER_ABOUT', 'OWNER_CHAT_ID', 'OWNER_LID', 'WAHA_URL', 'WAHA_API_KEY', 'WAHA_SESSION', 'WEBHOOK_HMAC_KEY', 'CLAUDE_BIN'];
 for (const key of REQUIRED) {
@@ -55,12 +57,20 @@ const PANDOC_IMAGE = 'pandoc/core:3.11.0';
 const PANDOC_TIMEOUT_MS = 60_000;
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
+const STRIPE_API = 'https://api.stripe.com/v1';
+const PAY_BLOCK = /\[\[PAGO\|([^\]\n]{1,160})\]\]/g;
+const PAYMENT_HINT = /pago|pagar|enlace|link|cobr|precio|stripe|producto|plan|mensualidad/i;
+const CATALOG_FILE = path.join(WORKSPACE, 'stripe-catalog.txt');
+const CATALOG_TTL_MS = 60 * 60 * 1000;
+const CATALOG_MAX_PAGES = 5;
+
 // Se lee en cada mensaje: los cambios en el prompt o en perfil/emisor.txt se aplican sin reiniciar.
-function systemPrompt() {
+function systemPrompt(catalog) {
   const emisor = fs.existsSync(EMISOR_FILE)
     ? fs.readFileSync(EMISOR_FILE, 'utf8').trim()
     : '(sin datos: pídeselos a {{OWNER_NAME}} antes de redactar un contrato)';
   return fs.readFileSync(PROMPT_FILE, 'utf8')
+    .replaceAll('{{CATALOGO}}', catalog)
     .replaceAll('{{EMISOR}}', emisor)
     .replaceAll('{{OWNER_NAME}}', env.OWNER_NAME)
     .replaceAll('{{OWNER_ABOUT}}', env.OWNER_ABOUT);
@@ -220,13 +230,81 @@ function saveSessionId(id) {
   fs.writeFileSync(SESSION_FILE, JSON.stringify({ id }));
 }
 
-function runClaude(prompt, sessionId) {
+async function stripeRequest(pathname, params) {
+  const res = await fetch(`${STRIPE_API}/${pathname}`, {
+    method: params ? 'POST' : 'GET',
+    headers: {
+      Authorization: `Bearer ${env.STRIPE_API_KEY}`,
+      ...(params ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
+    },
+    body: params ? new URLSearchParams(params) : undefined,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Stripe: ${data.error?.message || `HTTP ${res.status}`}`);
+  return data;
+}
+
+function describePrice(price) {
+  const name = price.product?.name || price.product;
+  const amount = `${(price.unit_amount / 100).toLocaleString('es-ES')} ${price.currency.toUpperCase()}`;
+  return `${name} · ${amount}${price.recurring ? ` / ${price.recurring.interval}` : ''}`;
+}
+
+// Catálogo de precios activos, cacheado una hora en workspace/stripe-catalog.txt.
+async function stripeCatalog() {
+  if (fs.existsSync(CATALOG_FILE) && Date.now() - fs.statSync(CATALOG_FILE).mtimeMs < CATALOG_TTL_MS) {
+    return fs.readFileSync(CATALOG_FILE, 'utf8');
+  }
+  const lines = [];
+  let startingAfter = null;
+  for (let page = 0; page < CATALOG_MAX_PAGES; page++) {
+    const query = `prices?active=true&limit=100&expand[]=data.product${startingAfter ? `&starting_after=${startingAfter}` : ''}`;
+    const list = await stripeRequest(query);
+    for (const price of list.data) {
+      if (price.product?.active === false) continue;
+      lines.push(`${price.id} | ${describePrice(price)}`);
+    }
+    if (!list.has_more) break;
+    startingAfter = list.data.at(-1).id;
+  }
+  const text = lines.join('\n');
+  fs.writeFileSync(CATALOG_FILE, text);
+  return text;
+}
+
+// spec: "price_..." (producto del catálogo) o "importe|moneda|concepto" (importe a medida).
+async function createPaymentLink(spec) {
+  let price;
+  if (spec.trim().startsWith('price_')) {
+    price = await stripeRequest(`prices/${encodeURIComponent(spec.trim())}?expand[]=product`);
+  } else {
+    const [amountText = '', currency = '', concept = ''] = spec.split('|').map((s) => s.trim());
+    const cents = Math.round(Number(amountText.replace(',', '.')) * 100);
+    if (!Number.isFinite(cents) || cents <= 0) throw new Error(`importe no válido: «${amountText}»`);
+    if (!/^[a-z]{3}$/i.test(currency)) throw new Error(`moneda no válida: «${currency}»`);
+    if (!concept) throw new Error('falta el concepto');
+    price = await stripeRequest('prices', {
+      currency: currency.toLowerCase(),
+      unit_amount: String(cents),
+      'product_data[name]': concept,
+    });
+    price = { ...price, product: { name: concept } };
+  }
+  const link = await stripeRequest('payment_links', {
+    'line_items[0][price]': price.id,
+    'line_items[0][quantity]': '1',
+    'metadata[creado_por]': 'jarvis',
+  });
+  return { url: link.url, label: describePrice(price) };
+}
+
+function runClaude(prompt, sessionId, sysPrompt) {
   const args = [
     '-p', '--output-format', 'json',
     '--tools', '',
     '--setting-sources', 'project',
     '--strict-mcp-config', '--mcp-config', MCP_NONE,
-    '--system-prompt', systemPrompt(),
+    '--system-prompt', sysPrompt,
     '--system-prompt-snapshot', 'off', // si no, al reanudar reutiliza el prompt grabado y ignora cambios
   ];
   if (sessionId) args.push('--resume', sessionId);
@@ -259,19 +337,32 @@ function runClaude(prompt, sessionId) {
   });
 }
 
+// El catálogo solo viaja cuando el mensaje habla de pagos: ahorra tokens en el resto.
+async function catalogForMessage(text) {
+  if (!env.STRIPE_API_KEY) return '(Stripe no está configurado: no puedes crear enlaces de pago)';
+  if (!PAYMENT_HINT.test(text)) return '(no incluido en este mensaje; si hace falta, pide que mencionen el pago o el enlace)';
+  try {
+    return await stripeCatalog();
+  } catch (e) {
+    log(`ERROR catálogo Stripe: ${e.message}`);
+    return `(no pude leer el catálogo: ${e.message}; solo puedes crear enlaces de importe a medida)`;
+  }
+}
+
 async function askClaude(text) {
   const now = new Date().toLocaleString('es-ES', { timeZone: env.TZ || 'Europe/Madrid' });
   const notes = notesForClaude.splice(0).map((n) => `[Nota del sistema: ${n}]\n`).join('');
   const prompt = `${notes}[${now}] ${text}`;
+  const sysPrompt = systemPrompt(await catalogForMessage(text));
   const sessionId = readSessionId();
   try {
-    const r = await runClaude(prompt, sessionId);
+    const r = await runClaude(prompt, sessionId, sysPrompt);
     saveSessionId(r.sessionId);
     return r.text;
   } catch (e) {
     if (!sessionId) throw e;
     log(`no pude continuar la conversación (${e.message}); empiezo una nueva`);
-    const r = await runClaude(prompt, null);
+    const r = await runClaude(prompt, null, sysPrompt);
     saveSessionId(r.sessionId);
     return r.text;
   }
@@ -328,9 +419,15 @@ async function converse(ownerChat, text) {
     log(`ERROR Claude: ${e.message}`);
     reply = `No pude responderte: ${e.message}`;
   }
-  const withoutDocs = extractDocs(reply);
+  const payments = await processPayments(ownerChat, reply);
+  const withoutDocs = extractDocs(payments.text);
   const withoutDocSends = extractDocSends(withoutDocs.visible);
-  const { visible, drafts } = extractDrafts(withoutDocSends.visible);
+  const extracted = extractDrafts(withoutDocSends.visible);
+  const { visible } = extracted;
+  const drafts = extracted.drafts.filter((d) => !d.text.includes('{{ENLACE}}'));
+  if (drafts.length < extracted.drafts.length) {
+    await sendText(ownerChat, 'No preparé el mensaje con el enlace porque el enlace de pago no se pudo crear.');
+  }
   if (visible) await sendText(ownerChat, visible);
   for (const doc of withoutDocs.docs) {
     await deliverDoc(ownerChat, doc);
@@ -345,6 +442,33 @@ async function converse(ownerChat, text) {
   }
   const counts = `${withoutDocs.docs.length} documentos, ${withoutDocSends.sends.length} envíos de documento, ${drafts.length} borradores`;
   log(`Claude → dueño (${visible.length} car., ${counts})`);
+}
+
+// Crea los enlaces [[PAGO|...]] y pone la URL donde Claude escribió {{ENLACE}}.
+// Crear un enlace no cobra nada; enviarlo a un cliente sigue necesitando "sí N".
+async function processPayments(ownerChat, reply) {
+  const specs = [...reply.matchAll(PAY_BLOCK)].map((m) => m[1]);
+  let text = reply.replace(PAY_BLOCK, '').trim();
+  if (!specs.length) return { text };
+  if (!env.STRIPE_API_KEY) {
+    await sendText(ownerChat, 'No puedo crear enlaces de pago: falta la clave de Stripe en .secrets/stripe.env.');
+    return { text };
+  }
+  let lastUrl = null;
+  for (const spec of specs) {
+    try {
+      const { url, label } = await createPaymentLink(spec);
+      lastUrl = url;
+      log(`enlace de pago creado (${label})`);
+      notesForClaude.push(`Enlace de pago creado: ${label} → ${url}`);
+      await sendText(ownerChat, `💳 *Enlace de pago* · ${label}\n${url}`);
+    } catch (e) {
+      log(`ERROR enlace de pago: ${e.message}`);
+      await sendText(ownerChat, `No pude crear el enlace de pago: ${e.message}`);
+    }
+  }
+  if (lastUrl) text = text.replaceAll('{{ENLACE}}', lastUrl);
+  return { text };
 }
 
 // Envío de un documento a un tercero: queda pendiente hasta el "sí N" del dueño.
