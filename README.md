@@ -25,12 +25,16 @@ cd ~ && git clone https://github.com/jsegomeez-collab/jarvis-os.git && cd jarvis
 
 El instalador te pide tu nombre, a qué te dedicas y tu WhatsApp **personal**. Luego te abre un QR: escanéalo con el móvil del número **secundario** (WhatsApp › Dispositivos vinculados › Vincular dispositivo). Al terminar te llega un "Hola, soy Jarvis".
 
+**Para los contratos:** rellena los datos de tu empresa en `perfil/emisor.txt` (el instalador lo crea). Se leen en cada mensaje y nunca se suben a git.
+
 ## Cómo se usa
 
 | Le dices | Qué pasa |
 |---|---|
 | Cualquier mensaje o nota de voz | Te contesta. Las notas de voz te las transcribe primero («Te entendí: …») |
 | «Haz seguimiento a Ana (+34600111222) sobre la propuesta» | Te enseña un **Borrador N** con el texto exacto |
+| «Hazme un contrato de mentoría para Ana, 3 meses, 1.500 USD…» | Te llega el contrato en **Word** por WhatsApp (borrador: revísalo) |
+| «Envíaselo a Ana (+34600111222)» | **Borrador N** con el Word adjunto; se envía con `sí N` |
 | `sí N` (escrito) | El borrador se envía. Por voz no vale, a propósito |
 | `no N` | El borrador se descarta |
 | `/nuevo` | Empieza una conversación desde cero |
