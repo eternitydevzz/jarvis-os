@@ -1,0 +1,16 @@
+# Secretos y datos personales de cada dueño: nunca al repo.
+.secrets/
+config.env
+waha/.env
+waha/.sessions/
+waha/qr/qr.png
+waha/qr/qr.tmp
+
+# Descargas y estado local
+waha/whisper-models/
+workspace/
+logs/
+
+# Sistema
+.DS_Store
+Thumbs.db

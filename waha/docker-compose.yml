@@ -1,0 +1,28 @@
+# WAHA (WhatsApp HTTP API) para Jarvis.
+# Docs: https://waha.devlike.pro/docs/how-to/install/ · seguridad: https://waha.devlike.pro/docs/how-to/security/
+services:
+  waha:
+    image: devlikeapro/waha:latest-2026.9.2   # versión fija (Docker Hub, 2026-10-02)
+    container_name: jarvis-waha
+    restart: always
+    ports:
+      - "127.0.0.1:3000:3000"   # solo accesible desde este PC
+    env_file:
+      - .env                    # WAHA_API_KEY (hash sha512) y credenciales del dashboard; fuera de git
+    volumes:
+      - ./.sessions:/app/.sessions   # la sesión de WhatsApp sobrevive a reinicios
+
+  # Whisper: pasa las notas de voz a texto en este PC (el audio no sale de aquí).
+  # Docs: https://ahmetoner.github.io/whisper-asr-webservice/
+  whisper:
+    image: onerahmet/openai-whisper-asr-webservice:v1.10.0   # versión fija (Docker Hub, 2026-08-09; amd64 + arm64)
+    container_name: jarvis-whisper
+    restart: always
+    ports:
+      - "127.0.0.1:9000:9000"   # solo accesible desde este PC
+    environment:
+      - ASR_ENGINE=faster_whisper
+      - ASR_MODEL=small
+      - ASR_MODEL_PATH=/data/whisper
+    volumes:
+      - ./whisper-models:/data/whisper   # el modelo se descarga una vez

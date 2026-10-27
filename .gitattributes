@@ -1,0 +1,4 @@
+# Los scripts de Mac/Linux deben tener saltos de línea LF o bash falla.
+*.sh text eol=lf
+*.mjs text eol=lf
+*.ps1 text eol=crlf
