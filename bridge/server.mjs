@@ -349,8 +349,18 @@ async function catalogForMessage(text) {
   }
 }
 
+// Una zona horaria mal escrita en config.env no debe tumbar cada mensaje.
+function localNow() {
+  try {
+    return new Date().toLocaleString('es-ES', { timeZone: env.TZ || 'Europe/Madrid' });
+  } catch {
+    log(`zona horaria no válida en config.env («${env.TZ}»); uso Europe/Madrid`);
+    return new Date().toLocaleString('es-ES', { timeZone: 'Europe/Madrid' });
+  }
+}
+
 async function askClaude(text) {
-  const now = new Date().toLocaleString('es-ES', { timeZone: env.TZ || 'Europe/Madrid' });
+  const now = localNow();
   const notes = notesForClaude.splice(0).map((n) => `[Nota del sistema: ${n}]\n`).join('');
   const prompt = `${notes}[${now}] ${text}`;
   const sysPrompt = systemPrompt(await catalogForMessage(text));

@@ -47,10 +47,20 @@ read -r -p "  ¿A qué te dedicas? (una línea): " OWNER_ABOUT
 read -r -p "  Tu WhatsApp PERSONAL, con prefijo (ej. +34600111222): " PHONE_RAW
 read -r -p "  Zona horaria [Europe/Madrid]: " TZ_IN
 OWNER_PHONE="$(printf '%s' "$PHONE_RAW" | tr -cd '0-9')"
-TZ_VALUE="${TZ_IN:-Europe/Madrid}"
+# Acepta "Europe/Madrid" o solo "Madrid"; si no es una zona válida, usa Europe/Madrid.
+TZ_VALUE="$(node -e '
+  const input = (process.argv[1] || "Europe/Madrid").trim();
+  const ok = (tz) => { try { new Intl.DateTimeFormat("es", { timeZone: tz }); return true; } catch { return false; } };
+  const found = [input, "Europe/" + input, "America/" + input].find(ok);
+  console.log(found || "");
+' "$TZ_IN")"
+if [ -z "$TZ_VALUE" ]; then
+  echo "  ⚠ «$TZ_IN» no es una zona horaria válida; uso Europe/Madrid"
+  TZ_VALUE="Europe/Madrid"
+fi
 [ -n "$OWNER_NAME" ] || fail "El nombre no puede ir vacío"
 [ "${#OWNER_PHONE}" -ge 8 ] || fail "Ese número no parece válido: $PHONE_RAW"
-ok "Hola $OWNER_NAME"
+ok "Hola $OWNER_NAME · zona horaria $TZ_VALUE"
 
 # ---------------------------------------------------------------------------
 step "3/8 · Genero tus claves (no se muestran)"
@@ -60,8 +70,10 @@ WAHA_API_KEY="$(openssl rand -hex 32)"
 WAHA_HASH="$(printf '%s' "$WAHA_API_KEY" | openssl dgst -sha512 | awk '{print $NF}')"
 DASH_PW="$(openssl rand -hex 16)"
 HMAC_KEY="$(openssl rand -hex 32)"
-printf 'WAHA_API_KEY=sha512:%s\nWAHA_DASHBOARD_USERNAME=jarvis\nWAHA_DASHBOARD_PASSWORD=%s\nWHATSAPP_SWAGGER_USERNAME=jarvis\nWHATSAPP_SWAGGER_PASSWORD=%s\n' \
-  "$WAHA_HASH" "$DASH_PW" "$DASH_PW" > "$ROOT/waha/.env"
+# WAHA publica una etiqueta distinta por chip (misma versión 2026.9.2).
+if [ "$(uname -m)" = "arm64" ]; then WAHA_TAG="arm-2026.9.2"; else WAHA_TAG="latest-2026.9.2"; fi
+printf 'WAHA_TAG=%s\nWAHA_API_KEY=sha512:%s\nWAHA_DASHBOARD_USERNAME=jarvis\nWAHA_DASHBOARD_PASSWORD=%s\nWHATSAPP_SWAGGER_USERNAME=jarvis\nWHATSAPP_SWAGGER_PASSWORD=%s\n' \
+  "$WAHA_TAG" "$WAHA_HASH" "$DASH_PW" "$DASH_PW" > "$ROOT/waha/.env"
 printf 'WAHA_API_KEY=%s\nWAHA_URL=%s\n' "$WAHA_API_KEY" "$WAHA_URL" > "$ROOT/.secrets/waha.env"
 printf 'WEBHOOK_HMAC_KEY=%s\n' "$HMAC_KEY" > "$ROOT/.secrets/bridge.env"
 umask 022
@@ -81,6 +93,7 @@ ok "WAHA responde"
 
 # ---------------------------------------------------------------------------
 step "5/8 · Conecta tu número SECUNDARIO de WhatsApp"
+echo "  ⚠ Usa un número que NO esté vinculado a otro Jarvis: si dos Jarvis comparten número, los dos contestan."
 WEBHOOK_JSON="{\"url\":\"http://host.docker.internal:3100/webhook\",\"events\":[\"message\"],\"hmac\":{\"key\":\"$HMAC_KEY\"},\"retries\":{\"policy\":\"constant\",\"delaySeconds\":2,\"attempts\":3}}"
 waha -X POST -H "Content-Type: application/json" \
   -d "{\"name\":\"$SESSION\",\"config\":{\"webhooks\":[$WEBHOOK_JSON]}}" "$WAHA_URL/api/sessions" >/dev/null

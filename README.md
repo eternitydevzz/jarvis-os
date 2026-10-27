@@ -61,6 +61,8 @@ El instalador te pide tu nombre, a qué te dedicas y tu WhatsApp **personal**. L
 
 Si el Mac se duerme, Jarvis no contesta hasta que despierte.
 
+**Un número secundario = un solo Jarvis.** Si vinculas el mismo número a dos Jarvis (por ejemplo en dos ordenadores), los dos contestarán a cada mensaje.
+
 ## En Windows
 
 Funciona igual con Docker Desktop: `scripts/start-jarvis.ps1` y `scripts/install-task.ps1` (tarea programada al iniciar sesión). El instalador de un comando es, de momento, solo para Mac.

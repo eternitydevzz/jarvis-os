@@ -2,7 +2,9 @@
 # Docs: https://waha.devlike.pro/docs/how-to/install/ · seguridad: https://waha.devlike.pro/docs/how-to/security/
 services:
   waha:
-    image: devlikeapro/waha:latest-2026.9.2   # versión fija (Docker Hub, 2026-10-02)
+    # Versión fija 2026.9.2 (Docker Hub, 2026-10-02). La etiqueta cambia según el chip:
+    # latest-2026.9.2 = PC (amd64) · arm-2026.9.2 = Mac Apple Silicon (arm64). setup.sh pone WAHA_TAG en .env.
+    image: devlikeapro/waha:${WAHA_TAG:-latest-2026.9.2}
     container_name: jarvis-waha
     restart: always
     ports:
